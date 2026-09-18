@@ -1,0 +1,34 @@
+- name: Load conntrack module (for nf_conntrack_max)
+  community.general.modprobe:
+    name: nf_conntrack
+    state: present
+    persistent: present
+  failed_when: false
+
+- name: Kernel parameters for high connection rates
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-titanedge.conf
+    sysctl_set: true
+    reload: true
+  loop: "{{ kernel_sysctls | dict2items }}"
+  # WSL2 and some containers expose a read-only subset of /proc/sys.
+  failed_when: false
+
+- name: Raise open-file limits
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/90-titanedge.conf
+    mode: "0644"
+    content: |
+      *    soft nofile {{ nofile_limit }}
+      *    hard nofile {{ nofile_limit }}
+      root soft nofile {{ nofile_limit }}
+      root hard nofile {{ nofile_limit }}
+
+- name: Raise systemd default open-file limit
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/system.conf
+    regexp: '^#?DefaultLimitNOFILE='
+    line: "DefaultLimitNOFILE={{ nofile_limit }}"
+  when: ansible_facts['service_mgr'] == 'systemd'

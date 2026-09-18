@@ -1,0 +1,15 @@
+.git
+**/node_modules
+**/.next
+web/out
+bin
+dist
+coverage*
+*.test
+*.out
+infra/terraform/**/.terraform
+infra/terraform/**/*.tfstate*
+reports
+docs
+.idea
+.vscode

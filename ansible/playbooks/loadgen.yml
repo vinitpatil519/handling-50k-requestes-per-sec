@@ -1,0 +1,35 @@
+# Distributed load-generation fleet outside Kubernetes.
+#
+# 1. Builds titanload once on the control node (static Linux binary).
+# 2. Tunes kernels on every load host (ephemeral ports, fd limits, backlog).
+# 3. Installs titanload as a systemd service in worker (--loop) mode.
+#
+# Then start a run from the coordinator host:
+#   titanload coordinator --expect-workers 3 -u http://target/api/v1/ping -r 300000 -d 10m
+- name: Build titanload
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Compile static linux/amd64 binary
+      ansible.builtin.command:
+        cmd: go build -trimpath -ldflags "-s -w" -o {{ playbook_dir }}/../dist/titanload ./cmd/titanload
+        chdir: "{{ playbook_dir }}/../.."
+      environment:
+        CGO_ENABLED: "0"
+        GOOS: linux
+        GOARCH: amd64
+      changed_when: true
+
+- name: Load hosts
+  hosts: loadgen_coordinator:loadgen_workers
+  become: true
+  roles:
+    - kernel_tuning
+    - titanload
+
+- name: Worker services
+  hosts: loadgen_workers
+  become: true
+  roles:
+    - titanload_worker

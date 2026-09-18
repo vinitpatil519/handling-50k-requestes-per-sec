@@ -1,0 +1,9 @@
+image:
+  repository: jaegertracing/jaeger
+  tag: "2.21.0"
+ui:
+  serviceType: NodePort
+  nodePort: 30686
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits: { memory: 1Gi }

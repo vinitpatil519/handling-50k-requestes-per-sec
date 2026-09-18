@@ -1,0 +1,73 @@
+# Read-only access to the TitanEdge namespace for on-call engineers.
+# Bind a group from your identity provider (EKS access entries / OIDC).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "titan.fullname" . }}-viewer
+  labels:
+    {{- include "titan.labels" (dict "root" . "name" "rbac") | nindent 4 }}
+rules:
+  - apiGroups: ["", "apps", "autoscaling", "policy", "batch", "networking.k8s.io"]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - configmaps
+      - events
+      - deployments
+      - statefulsets
+      - replicasets
+      - horizontalpodautoscalers
+      - poddisruptionbudgets
+      - jobs
+      - networkpolicies
+    verbs: [get, list, watch]
+  - apiGroups: ["keda.sh"]
+    resources: [scaledobjects]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "titan.fullname" . }}-viewer
+  labels:
+    {{- include "titan.labels" (dict "root" . "name" "rbac") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "titan.fullname" . }}-viewer
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: titanedge:oncall
+---
+# Operators may additionally restart and scale workloads during incidents.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "titan.fullname" . }}-operator
+  labels:
+    {{- include "titan.labels" (dict "root" . "name" "rbac") | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: [deployments, deployments/scale, statefulsets, statefulsets/scale]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "titan.fullname" . }}-operator
+  labels:
+    {{- include "titan.labels" (dict "root" . "name" "rbac") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "titan.fullname" . }}-operator
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: titanedge:operators

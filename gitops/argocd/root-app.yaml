@@ -1,0 +1,22 @@
+# App of apps: applying this one Application makes Argo CD install and keep
+# reconciling everything under gitops/argocd/apps in sync-wave order.
+#   scripts/argocd-bootstrap.sh <your-repo-url>
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: titanedge-root
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: titanedge
+  source:
+    repoURL: https://github.com/YOUR_ORG/titanedge.git
+    targetRevision: main
+    path: gitops/argocd/apps
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }

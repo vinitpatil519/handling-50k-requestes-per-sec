@@ -1,0 +1,6 @@
+apiVersion: v2
+name: titanload
+description: Distributed titanload run - one coordinator plus N workers inside the cluster.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

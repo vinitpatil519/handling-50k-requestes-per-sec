@@ -1,0 +1,39 @@
+# kubectl, kind and Helm as pinned static binaries.
+- name: kubectl
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/{{ go_arch }}/kubectl"
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+
+- name: kind
+  ansible.builtin.get_url:
+    url: "https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-{{ go_arch }}"
+    dest: /usr/local/bin/kind
+    mode: "0755"
+
+- name: Check Helm version
+  ansible.builtin.command: helm version --short
+  register: helm_current
+  changed_when: false
+  failed_when: false
+
+- name: Helm
+  when: helm_version not in (helm_current.stdout | default(''))
+  block:
+    - name: Download Helm
+      ansible.builtin.unarchive:
+        src: "https://get.helm.sh/helm-{{ helm_version }}-linux-{{ go_arch }}.tar.gz"
+        dest: /tmp
+        remote_src: true
+
+    - name: Install Helm
+      ansible.builtin.copy:
+        src: "/tmp/linux-{{ go_arch }}/helm"
+        dest: /usr/local/bin/helm
+        mode: "0755"
+        remote_src: true
+
+- name: kubectl bash completion
+  ansible.builtin.shell: kubectl completion bash > /etc/bash_completion.d/kubectl
+  args:
+    creates: /etc/bash_completion.d/kubectl

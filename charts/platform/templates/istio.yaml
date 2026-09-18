@@ -1,0 +1,135 @@
+{{- if include "titan.hasIstio" . }}
+{{- $ns := .Release.Namespace -}}
+# Namespace-wide mutual TLS: every sidecar-to-sidecar hop is encrypted and
+# authenticated with SPIFFE identities.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+spec:
+  mtls:
+    mode: {{ .Values.istio.mtlsMode }}
+{{- /* Ports that must accept plaintext: the public NGINX listener (NodePort
+       traffic arrives without mTLS) and Prometheus scrape ports. */}}
+{{- range $t := list (dict "name" "nginx" "ports" (list 8080 9113)) (dict "name" "envoy" "ports" (list 9901)) (dict "name" "api" "ports" (list 9102)) (dict "name" "worker" "ports" (list 9102)) }}
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: {{ include "titan.component" (dict "root" $ "name" $t.name) }}-plaintext-ports
+spec:
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" (dict "root" $ "name" $t.name) | nindent 6 }}
+  mtls:
+    mode: {{ $.Values.istio.mtlsMode }}
+  portLevelMtls:
+    {{- range $p := $t.ports }}
+    {{ $p }}:
+      mode: PERMISSIVE
+    {{- end }}
+{{- end }}
+---
+# L7 authorization: only Envoy (and the load-test namespace) may call the API.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "titan.component" (dict "root" . "name" "api") }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" (dict "root" . "name" "api") | nindent 6 }}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/{{ $ns }}/sa/{{ include "titan.component" (dict "root" . "name" "envoy") }}
+        - source:
+            namespaces: [{{ .Values.networkPolicy.loadTestNamespace | quote }}]
+      to:
+        - operation:
+            ports: ["8080", "9090"]
+    - to:
+        - operation:
+            ports: ["9102"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "titan.component" (dict "root" . "name" "envoy") }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" (dict "root" . "name" "envoy") | nindent 6 }}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/{{ $ns }}/sa/{{ include "titan.component" (dict "root" . "name" "nginx") }}
+              - cluster.local/ns/{{ $ns }}/sa/{{ include "titan.component" (dict "root" . "name" "web") }}
+        - source:
+            namespaces: [{{ .Values.networkPolicy.loadTestNamespace | quote }}]
+      to:
+        - operation:
+            ports: ["8080"]
+    - to:
+        - operation:
+            ports: ["9901"]
+---
+# Envoy already balances per request across API pods; tell the sidecar to use
+# HTTP/2 upstream and least-request as well.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "titan.component" (dict "root" . "name" "api") }}
+spec:
+  host: {{ include "titan.component" (dict "root" . "name" "api") }}.{{ $ns }}.svc.cluster.local
+  trafficPolicy:
+    loadBalancer:
+      simple: LEAST_REQUEST
+    connectionPool:
+      http:
+        h2UpgradePolicy: UPGRADE
+        http2MaxRequests: 100000
+        maxRequestsPerConnection: 0
+      tcp:
+        maxConnections: 10000
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 5s
+      baseEjectionTime: 15s
+      maxEjectionPercent: 50
+{{- $kafka := include "titan.component" (dict "root" . "name" "kafka") }}
+{{- range $host := list (include "titan.component" (dict "root" . "name" "postgres")) (include "titan.component" (dict "root" . "name" "redis")) $kafka (printf "%s-headless" $kafka) }}
+---
+# Data stores run without sidecars: talk plaintext to them explicitly
+# (auto-mTLS would detect this too; being explicit avoids surprises).
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ $host }}
+spec:
+  host: {{ $host }}.{{ $ns }}.svc.cluster.local
+  exportTo: ["."]
+  trafficPolicy:
+    tls:
+      mode: DISABLE
+{{- end }}
+{{- if .Values.istio.sidecarScope }}
+---
+# Restrict each sidecar's config to the services it actually talks to.
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: default
+spec:
+  egress:
+    - hosts:
+        - "./*"
+        - "istio-system/*"
+        - "observability/*"
+        - "monitoring/*"
+{{- end }}
+{{- end }}

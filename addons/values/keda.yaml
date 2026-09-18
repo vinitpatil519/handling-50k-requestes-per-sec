@@ -1,0 +1,18 @@
+resources:
+  operator:
+    requests: { cpu: 50m, memory: 64Mi }
+  metricServer:
+    requests: { cpu: 50m, memory: 64Mi }
+prometheus:
+  operator:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: kube-prometheus-stack
+  metricServer:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: kube-prometheus-stack

@@ -1,0 +1,21 @@
+- name: Supported OS
+  ansible.builtin.assert:
+    that: ansible_facts['os_family'] == 'Debian'
+    fail_msg: "These roles target Ubuntu/Debian (including WSL2). Adapt package tasks for {{ ansible_facts['os_family'] }}."
+
+- name: Base packages
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - git
+      - gnupg
+      - jq
+      - make
+      - unzip
+      - htop
+      - net-tools
+    state: present
+    update_cache: true
+    cache_valid_time: 3600

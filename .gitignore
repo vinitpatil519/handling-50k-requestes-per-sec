@@ -1,0 +1,37 @@
+# Go
+/bin/
+/dist/
+*.test
+*.out
+coverage*
+
+# Node / Next.js
+node_modules/
+.next/
+web/out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+terraform.tfvars
+backend.tf
+.terraform.lock.hcl.bak
+
+# Ansible
+ansible/dist/
+*.retry
+
+# Reports / local
+reports/
+debug/
+.env
+.env.*
+*.log
+.DS_Store
+.idea/
+.vscode/

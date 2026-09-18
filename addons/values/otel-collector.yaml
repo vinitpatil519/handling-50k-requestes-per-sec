@@ -1,0 +1,69 @@
+# OpenTelemetry Collector gateway: OTLP in, traces to Jaeger, span metrics
+# to Prometheus. Service name "otel-collector" is referenced by the platform
+# chart (otel.endpoint).
+fullnameOverride: otel-collector
+mode: deployment
+replicaCount: 1
+image:
+  repository: otel/opentelemetry-collector-contrib
+command:
+  name: otelcol-contrib
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits: { memory: 512Mi }
+ports:
+  metrics:
+    enabled: true
+  prom-spanmetrics:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+    protocol: TCP
+serviceMonitor:
+  enabled: true
+  metricsEndpoints:
+    - port: metrics
+    - port: prom-spanmetrics
+  extraLabels:
+    release: kube-prometheus-stack
+config:
+  receivers:
+    jaeger: null
+    zipkin: null
+    prometheus: null
+  processors:
+    batch:
+      send_batch_size: 2048
+      timeout: 2s
+    memory_limiter:
+      check_interval: 1s
+      limit_percentage: 80
+      spike_limit_percentage: 25
+  connectors:
+    spanmetrics:
+      histogram:
+        explicit:
+          buckets: [1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s]
+      dimensions:
+        - name: http.route
+        - name: http.response.status_code
+  exporters:
+    otlp/jaeger:
+      endpoint: jaeger-collector.observability.svc.cluster.local:4317
+      tls:
+        insecure: true
+    prometheus:
+      endpoint: 0.0.0.0:8889
+      resource_to_telemetry_conversion:
+        enabled: true
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlp/jaeger, spanmetrics]
+      metrics:
+        receivers: [spanmetrics]
+        processors: [batch]
+        exporters: [prometheus]
+      logs: null

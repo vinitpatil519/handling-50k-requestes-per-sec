@@ -1,0 +1,7 @@
+# Shell scripts, YAML and configs must keep LF endings or they break inside
+# Linux containers and WSL.
+* text=auto eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary

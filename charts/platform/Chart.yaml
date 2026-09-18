@@ -1,0 +1,11 @@
+apiVersion: v2
+name: platform
+description: TitanEdge hyperscale platform - NGINX, Envoy, Go API, Kafka worker, Next.js, PostgreSQL, Redis and Kafka.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.30.0-0"
+keywords: [titanedge, envoy, nginx, kafka, keda, istio]
+maintainers:
+  - name: TitanEdge Platform Team
+home: https://github.com/titanedge/titanedge

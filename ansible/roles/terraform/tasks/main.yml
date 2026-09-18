@@ -1,0 +1,13 @@
+- name: Check installed Terraform
+  ansible.builtin.command: terraform version -json
+  register: tf_current
+  changed_when: false
+  failed_when: false
+
+- name: Install Terraform {{ terraform_version }}
+  when: terraform_version not in (tf_current.stdout | default(''))
+  ansible.builtin.unarchive:
+    src: "https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_linux_{{ go_arch }}.zip"
+    dest: /usr/local/bin
+    remote_src: true
+    mode: "0755"

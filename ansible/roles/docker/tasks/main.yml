@@ -1,0 +1,56 @@
+# Docker Engine from Docker's apt repository. Skipped under WSL2 when Docker
+# Desktop's WSL integration already provides the CLI.
+- name: Detect existing docker CLI
+  ansible.builtin.command: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}'
+  register: docker_present
+  changed_when: false
+  failed_when: false
+
+- name: Install Docker Engine
+  when: docker_present.rc != 0
+  block:
+    - name: Docker apt key
+      ansible.builtin.get_url:
+        url: "https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}/gpg"
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ go_arch }} signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/{{ ansible_facts['distribution'] | lower }}
+          {{ ansible_facts['distribution_release'] }} stable
+        filename: docker
+        state: present
+
+    - name: Docker packages
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Docker daemon config
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: "{{ docker_daemon_config | to_nice_json }}\n"
+      notify: Restart docker
+
+    - name: Docker running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+- name: Allow the login user to use docker
+  ansible.builtin.user:
+    name: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+    groups: docker
+    append: true
+  when: docker_present.rc != 0

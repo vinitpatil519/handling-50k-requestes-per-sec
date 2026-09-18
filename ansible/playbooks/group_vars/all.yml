@@ -1,0 +1,16 @@
+# Tool versions installed by the roles. Keep in step with addons/versions.env.
+go_version: "1.27.1"
+kubectl_version: "v1.36.1"
+kind_version: "v0.33.0"
+helm_version: "v4.3.0"
+terraform_version: "1.12.1"
+
+arch_map:
+  x86_64: amd64
+  aarch64: arm64
+go_arch: "{{ arch_map[ansible_facts['architecture']] | default('amd64') }}"
+
+# titanload distribution
+titanload_repo_dir: "{{ playbook_dir }}/../.."
+titanload_install_path: /usr/local/bin/titanload
+titanload_user: titanload

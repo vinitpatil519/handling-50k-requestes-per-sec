@@ -1,0 +1,45 @@
+# Distributed load test inside the cluster:
+#   helm install load ./charts/titanload -n titanload --create-namespace \
+#     --set workers=4 --set load.rate=100000 --set load.duration=5m
+#   kubectl -n titanload logs -f job/load-titanload-coordinator
+image:
+  registry: localhost:5001
+  repository: titanedge/titanload
+  tag: dev
+  pullPolicy: IfNotPresent
+
+workers: 3
+
+# Shared secret between coordinator and workers.
+token: change-me-titanload
+
+load:
+  # Through the full edge. Use http://titan-api-headless.titanedge:8080/... to
+  # benchmark the API tier alone, or grpc://titan-api.titanedge:9090 for gRPC.
+  url: http://titan-nginx.titanedge.svc.cluster.local/api/v1/ping
+  mode: http1
+  method: GET
+  body: ""
+  concurrency: 128      # per worker
+  rate: 0               # total rps across all workers; 0 = closed-loop max
+  duration: 2m
+  ramp: 20s
+  timeout: 5s
+  slo:
+    p99: 250ms
+    errorRatePercent: 1
+
+coordinator:
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+worker:
+  resources:
+    requests: { cpu: 500m, memory: 128Mi }
+    limits: { cpu: "2", memory: 512Mi }
+
+# Scrape coordinator /metrics for the TitanLoad Grafana dashboard.
+serviceMonitor:
+  enabled: true
+  release: kube-prometheus-stack

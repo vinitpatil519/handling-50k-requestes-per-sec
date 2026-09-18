@@ -1,0 +1,283 @@
+# TitanEdge platform chart.
+# Defaults target a laptop Kind cluster. environments/*/values.yaml override
+# them for bigger clusters (see environments/eks/values.yaml).
+
+global:
+  # Kind: scripts/kind-up.sh starts a registry at localhost:5001 that every
+  # node can pull from. Set to your ECR registry for EKS.
+  imageRegistry: localhost:5001
+  # Tag for the titanedge/* images. Jenkins bumps this through GitOps.
+  imageTag: dev
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []
+  podLabels: {}
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ------------------------------------------------------------------ platform
+istio:
+  # Requires Istio CRDs (installed by scripts/install-addons.sh --profile full).
+  enabled: false
+  mtlsMode: STRICT
+  # Limit sidecar config to what our workloads call; at scale this cuts
+  # istiod push size and sidecar memory dramatically.
+  sidecarScope: true
+
+monitoring:
+  # ServiceMonitors, PrometheusRules and Grafana dashboards. Rendered only
+  # when the monitoring.coreos.com CRDs exist in the cluster.
+  enabled: true
+  # kube-prometheus-stack selects ServiceMonitors / rules by this label.
+  release: kube-prometheus-stack
+  namespace: monitoring
+  dashboards: true
+  scrapeInterval: 15s
+
+keda:
+  # ScaledObjects are rendered only when the keda.sh CRDs exist; otherwise
+  # plain CPU HorizontalPodAutoscalers are used.
+  enabled: true
+
+networkPolicy:
+  enabled: true
+  # Namespaces allowed to scrape metrics / reach internal services.
+  monitoringNamespace: monitoring
+  kedaNamespace: keda
+  loadTestNamespace: titanload
+  jenkinsNamespace: jenkins
+
+otel:
+  endpoint: http://otel-collector.observability.svc.cluster.local:4317
+  sampleRatio: "0.01"
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+# Spread replicas across nodes; soft so a 1-node cluster still schedules.
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: ScheduleAnyway
+
+# ------------------------------------------------------------------ api
+api:
+  image:
+    repository: titanedge/api
+    tag: ""
+  replicas: 2
+  terminationGracePeriodSeconds: 30
+  # Time for endpoints to drain before SIGTERM (kube-proxy / Envoy DNS lag).
+  preStopSleepSeconds: 5
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { cpu: "1", memory: 256Mi }
+  env:
+    LOG_LEVEL: info
+    LOG_SAMPLE_RATE: "0.001"
+    MAX_INFLIGHT: "20000"
+    CACHE_TTL: 60s
+    DB_MAX_CONNS: "10"
+    REDIS_POOL_SIZE: "64"
+  migrate:
+    # Runs `titan-api migrate` as a Helm post-install/pre-upgrade hook and as an
+    # Argo CD Sync hook (wave 1, after the database exists).
+    enabled: true
+  autoscaling:
+    enabled: true
+    # hpa: CPU based (needs metrics-server)
+    # keda: requests/second per pod from Prometheus
+    type: hpa
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 60
+    keda:
+      rpsPerPod: "5000"
+      prometheusServer: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+  pdb:
+    minAvailable: 1
+
+# ------------------------------------------------------------------ worker
+worker:
+  image:
+    repository: titanedge/worker
+    tag: ""
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  env:
+    LOG_LEVEL: info
+    WORKER_FLUSH_INTERVAL: 2s
+    WORKER_FLUSH_SIZE: "5000"
+    DB_MAX_CONNS: "4"
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    # KEDA never scales past the partition count (idle consumers are useless).
+    maxReplicas: 12
+    lagThreshold: "1000"
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    maxUnavailable: 1
+
+# ------------------------------------------------------------------ web
+web:
+  image:
+    repository: titanedge/web
+    tag: ""
+  replicas: 2
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  links:
+    grafana: http://localhost:3000
+    prometheus: http://localhost:9090
+    jaeger: http://localhost:16686
+    argocd: https://localhost:8443
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    minAvailable: 1
+
+# ------------------------------------------------------------------ envoy
+envoy:
+  image:
+    repository: envoyproxy/envoy
+    tag: v1.39.1
+  replicas: 2
+  concurrency: 2
+  logLevel: warn
+  traceSamplePercent: 1
+  rateLimit:
+    enabled: true
+    maxTokens: 400000
+    tokensPerFill: 200000
+    fillInterval: 1s
+  circuitBreaker:
+    maxConnections: 10000
+    maxPendingRequests: 20000
+    maxRequests: 100000
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { cpu: "2", memory: 256Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 60
+  pdb:
+    minAvailable: 1
+
+# ------------------------------------------------------------------ nginx
+nginx:
+  image:
+    repository: nginxinc/nginx-unprivileged
+    tag: 1.30.5-alpine
+  exporter:
+    enabled: true
+    image:
+      repository: nginx/nginx-prometheus-exporter
+      tag: 1.5.3
+  replicas: 2
+  workerConnections: 65535
+  service:
+    # NodePort 30080 is mapped to localhost:8080 by kind/cluster.yaml.
+    type: NodePort
+    nodePort: 30080
+    annotations: {}
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { cpu: "2", memory: 256Mi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 60
+  pdb:
+    minAvailable: 1
+
+# Optional Kubernetes Ingress in front of the NGINX tier (e.g. AWS Load
+# Balancer Controller on EKS, or any IngressClass you run).
+ingress:
+  enabled: false
+  className: ""
+  host: titan.localtest.me
+  annotations: {}
+  tls: []
+
+# ------------------------------------------------------------------ data tier
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: 17-alpine
+  auth:
+    username: titan
+    database: titan
+    # Dev default. For real clusters create a Secret (External Secrets,
+    # Sealed Secrets, ...) with keys `password` and `database-url` and set
+    # existingSecret.
+    password: titan-dev-password
+    existingSecret: ""
+  maxConnections: 300
+  sharedBuffers: 256MB
+  storage:
+    size: 5Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "2", memory: 1Gi }
+
+# Used when postgres.enabled=false (e.g. Amazon RDS from infra/terraform).
+externalDatabase:
+  url: ""
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: 8-alpine
+  maxmemory: 256mb
+  # Dev default; override or source from a secret manager in real clusters.
+  password: titan-dev-redis
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: "1", memory: 384Mi }
+
+externalRedis:
+  addr: ""
+  password: ""
+  # ElastiCache with in-transit encryption.
+  tls: false
+
+kafka:
+  enabled: true
+  image:
+    repository: apache/kafka
+    tag: 4.3.1
+  # Combined broker+controller nodes (KRaft). 1 for Kind, 3 for production.
+  replicas: 1
+  topic: titan.events
+  partitions: 12
+  heapOpts: "-Xms384m -Xmx384m"
+  storage:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests: { cpu: 200m, memory: 768Mi }
+    limits: { cpu: "2", memory: 1Gi }
+
+externalKafka:
+  brokers: ""

@@ -1,0 +1,31 @@
+# Creates the Kind cluster, installs add-ons, builds images and deploys the
+# platform by driving the same scripts a human would run.
+#   ansible-playbook playbooks/kind-cluster.yml -e profile=full
+- name: TitanEdge on Kind
+  hosts: workstation
+  become: false
+  vars:
+    profile: lite
+    image_tag: dev
+    repo: "{{ playbook_dir }}/../.."
+  tasks:
+    - name: Create cluster and registry
+      ansible.builtin.command: "{{ repo }}/scripts/kind-up.sh"
+      register: kind_up
+      changed_when: "'creating kind cluster' in kind_up.stdout"
+
+    - name: Build and push images
+      ansible.builtin.command: "{{ repo }}/scripts/build-images.sh --tag {{ image_tag }}"
+      changed_when: true
+
+    - name: Install add-ons
+      ansible.builtin.command: "{{ repo }}/scripts/install-addons.sh --profile {{ profile }}"
+      changed_when: true
+
+    - name: Deploy platform
+      ansible.builtin.command: "{{ repo }}/scripts/deploy.sh --profile {{ profile }} --tag {{ image_tag }}"
+      changed_when: true
+
+    - name: Smoke test the edge
+      ansible.builtin.command: "{{ repo }}/scripts/smoke.sh"
+      changed_when: false

@@ -1,0 +1,24 @@
+# EKS overrides for kube-prometheus-stack (merged after addons/values).
+prometheus:
+  service:
+    type: ClusterIP
+  prometheusSpec:
+    retention: 15d
+    resources:
+      requests: { cpu: "1", memory: 4Gi }
+      limits: { memory: 8Gi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 100Gi
+grafana:
+  service:
+    type: ClusterIP
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 10Gi

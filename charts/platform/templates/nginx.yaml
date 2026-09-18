@@ -1,0 +1,260 @@
+{{- $c := dict "root" . "name" "nginx" -}}
+{{- $v := .Values.nginx -}}
+{{- $envoy := include "titan.component" (dict "root" . "name" "envoy") -}}
+{{- $web := include "titan.component" (dict "root" . "name" "web") -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+data:
+  nginx.conf: |
+    worker_processes auto;
+    worker_rlimit_nofile 200000;
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr warn;
+
+    events {
+      worker_connections {{ $v.workerConnections }};
+      multi_accept on;
+    }
+
+    http {
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path       /tmp/proxy_temp;
+      fastcgi_temp_path     /tmp/fastcgi_temp;
+      uwsgi_temp_path       /tmp/uwsgi_temp;
+      scgi_temp_path        /tmp/scgi_temp;
+
+      server_tokens off;
+      sendfile on;
+      tcp_nopush on;
+      tcp_nodelay on;
+      keepalive_timeout 65s;
+      keepalive_requests 100000;
+      reset_timedout_connection on;
+      client_max_body_size 1m;
+
+      # Resolve upstream names at runtime so scaling Envoy/web never needs
+      # an NGINX reload.
+      resolver kube-dns.kube-system.svc.cluster.local valid=10s ipv6=off;
+
+      split_clients "${request_id}" $sampled { 1% 1; * 0; }
+      map $status $is_error { ~^5 1; default 0; }
+      map "$sampled$is_error" $loggable { "00" 0; default 1; }
+      log_format json escape=json '{"ts":"$time_iso8601","remote":"$remote_addr","method":"$request_method",'
+                                  '"uri":"$request_uri","status":$status,"bytes":$body_bytes_sent,'
+                                  '"rt":$request_time,"urt":"$upstream_response_time","request_id":"$request_id",'
+                                  '"ua":"$http_user_agent"}';
+      access_log /dev/stdout json if=$loggable;
+
+      gzip on;
+      gzip_comp_level 4;
+      gzip_min_length 1024;
+      gzip_types application/json application/javascript text/css text/plain image/svg+xml;
+
+      upstream envoy {
+        zone envoy 64k;
+        server {{ $envoy }}.{{ .Release.Namespace }}.svc.cluster.local:8080 resolve;
+        keepalive 512;
+        keepalive_requests 100000;
+        keepalive_timeout 60s;
+      }
+
+      upstream web {
+        zone web 64k;
+        server {{ $web }}.{{ .Release.Namespace }}.svc.cluster.local:3000 resolve;
+        keepalive 64;
+      }
+
+      server {
+        listen 8080 reuseport backlog=65535;
+        server_name _;
+        # h2c prior knowledge and HTTP/1.1 share the port (titanload -m http2).
+        http2 on;
+
+        location = /nginx-health {
+          access_log off;
+          default_type text/plain;
+          return 200 "ok\n";
+        }
+
+        location /api/v1/ {
+          proxy_pass http://envoy;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_set_header Host $host;
+          proxy_set_header X-Request-ID $request_id;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_connect_timeout 2s;
+          proxy_read_timeout 30s;
+          proxy_send_timeout 30s;
+          add_header X-Request-ID $request_id always;
+        }
+
+        location /_next/static/ {
+          proxy_pass http://web;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          expires 1y;
+          add_header Cache-Control "public, immutable";
+        }
+
+        location / {
+          proxy_pass http://web;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_set_header Host $host;
+          proxy_set_header X-Request-ID $request_id;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+      }
+
+      server {
+        listen 8081;
+        location = /stub_status {
+          stub_status;
+          access_log off;
+          allow 127.0.0.1;
+          deny all;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  {{- if not $v.autoscaling.enabled }}
+  replicas: {{ $v.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "titan.podLabels" $c | nindent 8 }}
+      annotations:
+        checksum/config: {{ $v | toJson | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9113"
+    spec:
+      serviceAccountName: {{ include "titan.component" $c }}
+      automountServiceAccountToken: false
+      {{- include "titan.podSecurity" . | nindent 6 }}
+      {{- include "titan.topologySpread" $c | nindent 6 }}
+      containers:
+        - name: nginx
+          image: {{ include "titan.image" $v.image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /nginx-health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /nginx-health, port: http }
+            periodSeconds: 15
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 101
+            runAsGroup: 101
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+            - { name: cache, mountPath: /var/cache/nginx }
+        {{- if $v.exporter.enabled }}
+        - name: exporter
+          image: {{ include "titan.image" $v.exporter.image }}
+          imagePullPolicy: IfNotPresent
+          args: ["--nginx.scrape-uri=http://127.0.0.1:8081/stub_status"]
+          ports:
+            - { name: metrics, containerPort: 9113, protocol: TCP }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+          {{- include "titan.containerSecurity" . | nindent 10 }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "titan.component" $c }}
+        - { name: tmp, emptyDir: {} }
+        - { name: cache, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+  {{- with $v.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $v.service.type }}
+  selector:
+    {{- include "titan.selectorLabels" $c | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      appProtocol: http
+      {{- if and (eq $v.service.type "NodePort") $v.service.nodePort }}
+      nodePort: {{ $v.service.nodePort }}
+      {{- end }}
+    {{- if $v.exporter.enabled }}
+    - { name: http-metrics, port: 9113, targetPort: metrics, appProtocol: http }
+    {{- end }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  minAvailable: {{ $v.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+{{- if $v.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "titan.component" $c }}
+  minReplicas: {{ $v.autoscaling.minReplicas }}
+  maxReplicas: {{ $v.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ $v.autoscaling.targetCPUUtilizationPercentage }} }
+{{- end }}

@@ -1,0 +1,18 @@
+# Ships the titanload binary built by playbooks/loadgen.yml.
+- name: Service user
+  ansible.builtin.user:
+    name: "{{ titanload_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Install binary
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../dist/titanload"
+    dest: "{{ titanload_install_path }}"
+    mode: "0755"
+  notify: Restart titanload worker
+
+- name: Verify binary
+  ansible.builtin.command: "{{ titanload_install_path }} version"
+  changed_when: false

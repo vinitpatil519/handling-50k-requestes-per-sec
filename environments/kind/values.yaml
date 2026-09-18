@@ -1,0 +1,6 @@
+# Kind "lite" profile: no Istio. Jenkins updates global.imageTag here.
+global:
+  imageRegistry: localhost:5001
+  imageTag: dev
+istio:
+  enabled: false

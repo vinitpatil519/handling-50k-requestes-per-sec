@@ -1,0 +1,11 @@
+# Copy to backend.tf for shared, locked remote state (S3 native locking needs
+# Terraform >= 1.10; no DynamoDB table required).
+terraform {
+  backend "s3" {
+    bucket       = "my-titanedge-tfstate"
+    key          = "eks/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}

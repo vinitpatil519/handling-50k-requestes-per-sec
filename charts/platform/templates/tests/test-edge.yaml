@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "titan.fullname" . }}-test-edge
+  labels:
+    {{- include "titan.labels" (dict "root" . "name" "test") | nindent 4 }}
+    sidecar.istio.io/inject: "false"
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: curl
+      image: curlimages/curl:8.22.0
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -e
+          base=http://{{ include "titan.component" (dict "root" . "name" "nginx") }}
+          echo "ping through NGINX -> Envoy -> API"
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 3 "$base/api/v1/ping"
+          echo; echo "stats"
+          curl -fsS "$base/api/v1/stats"
+          echo; echo "cache-aside read"
+          curl -fsS -D - -o /dev/null "$base/api/v1/items/1" | grep -i x-cache
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }

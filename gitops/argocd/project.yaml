@@ -1,0 +1,34 @@
+# AppProject scoping what TitanEdge applications may deploy and where.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: titanedge
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  description: TitanEdge platform and its add-ons
+  sourceRepos:
+    - https://github.com/YOUR_ORG/titanedge.git
+    - https://prometheus-community.github.io/helm-charts
+    - https://grafana.github.io/helm-charts
+    - https://fluent.github.io/helm-charts
+    - https://open-telemetry.github.io/opentelemetry-helm-charts
+    - https://kedacore.github.io/charts
+    - https://istio-release.storage.googleapis.com/charts
+    - https://kubernetes-sigs.github.io/metrics-server
+  destinations:
+    - { server: https://kubernetes.default.svc, namespace: "*" }
+  clusterResourceWhitelist:
+    - { group: "*", kind: "*" }
+  orphanedResources:
+    warn: true
+  roles:
+    - name: deployer
+      description: CI may sync, but not delete, applications.
+      policies:
+        - p, proj:titanedge:deployer, applications, get, titanedge/*, allow
+        - p, proj:titanedge:deployer, applications, sync, titanedge/*, allow
+    - name: readonly
+      policies:
+        - p, proj:titanedge:readonly, applications, get, titanedge/*, allow
+      groups: [titanedge:oncall]

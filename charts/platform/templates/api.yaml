@@ -1,0 +1,237 @@
+{{- $c := dict "root" . "name" "api" -}}
+{{- $v := .Values.api -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  {{- if not $v.autoscaling.enabled }}
+  replicas: {{ $v.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "titan.podLabels" $c | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        # Istio merges these into its own scrape endpoint when mTLS is STRICT.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9102"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: {{ include "titan.component" $c }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ $v.terminationGracePeriodSeconds }}
+      {{- include "titan.podSecurity" . | nindent 6 }}
+      {{- include "titan.topologySpread" $c | nindent 6 }}
+      containers:
+        - name: api
+          image: {{ include "titan.ownImage" (dict "root" . "image" $v.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args: ["serve"]
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+            - { name: grpc, containerPort: 9090, protocol: TCP }
+            - { name: metrics, containerPort: 9102, protocol: TCP }
+          env:
+            {{- include "titan.backendEnv" . | nindent 12 }}
+            - name: OTEL_SERVICE_NAME
+              value: titan-api
+            - name: MIGRATE_ON_START
+              value: {{ (not $v.migrate.enabled) | quote }}
+            {{- range $k, $val := $v.env }}
+            - name: {{ $k }}
+              value: {{ $val | quote }}
+            {{- end }}
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ $v.preStopSleepSeconds }}
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          {{- include "titan.containerSecurity" . | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "titan.selectorLabels" $c | nindent 4 }}
+  ports:
+    - { name: http, port: 8080, targetPort: http, appProtocol: http }
+    - { name: grpc, port: 9090, targetPort: grpc, appProtocol: grpc }
+    - { name: http-metrics, port: 9102, targetPort: metrics, appProtocol: http }
+---
+# Headless service: Envoy resolves every pod IP (STRICT_DNS) and balances
+# per request instead of per connection, which matters for HTTP/2.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "titan.component" $c }}-headless
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    {{- include "titan.selectorLabels" $c | nindent 4 }}
+  ports:
+    - { name: http, port: 8080, targetPort: http, appProtocol: http }
+    - { name: grpc, port: 9090, targetPort: grpc, appProtocol: grpc }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  minAvailable: {{ $v.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+{{- if $v.autoscaling.enabled }}
+{{- if and (eq $v.autoscaling.type "keda") (include "titan.hasKeda" .) }}
+---
+# Scale on requests/second per pod measured by Prometheus. KEDA creates and
+# owns the underlying HPA.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "titan.component" $c }}
+  minReplicaCount: {{ $v.autoscaling.minReplicas }}
+  maxReplicaCount: {{ $v.autoscaling.maxReplicas }}
+  pollingInterval: 10
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - { type: Percent, value: 100, periodSeconds: 15 }
+        scaleDown:
+          stabilizationWindowSeconds: 180
+          policies:
+            - { type: Percent, value: 20, periodSeconds: 60 }
+  triggers:
+    - type: prometheus
+      metricType: AverageValue
+      metadata:
+        serverAddress: {{ $v.autoscaling.keda.prometheusServer }}
+        query: sum(rate(titan_http_requests_total{namespace="{{ .Release.Namespace }}"}[1m]))
+        threshold: {{ $v.autoscaling.keda.rpsPerPod | quote }}
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: {{ $v.autoscaling.targetCPUUtilizationPercentage | quote }}
+{{- else }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "titan.component" $c }}
+  minReplicas: {{ $v.autoscaling.minReplicas }}
+  maxReplicas: {{ $v.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $v.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - { type: Percent, value: 100, periodSeconds: 15 }
+        - { type: Pods, value: 4, periodSeconds: 15 }
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 180
+      policies:
+        - { type: Percent, value: 20, periodSeconds: 60 }
+{{- end }}
+{{- end }}
+{{- if $v.migrate.enabled }}
+---
+# Schema migrations run once per release, before new pods start.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "titan.component" $c }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "titan.labels" (dict "root" . "name" "migrate") | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,pre-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 10
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "titan.podLabels" (dict "root" . "name" "migrate" "noMesh" true) | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "titan.component" $c }}
+      automountServiceAccountToken: false
+      {{- include "titan.podSecurity" . | nindent 6 }}
+      containers:
+        - name: migrate
+          image: {{ include "titan.ownImage" (dict "root" . "image" $v.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args: ["migrate"]
+          env:
+            {{- include "titan.backendEnv" . | nindent 12 }}
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+          {{- include "titan.containerSecurity" . | nindent 10 }}
+{{- end }}

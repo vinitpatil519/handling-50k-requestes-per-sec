@@ -1,0 +1,26 @@
+apiVersion: 1
+# UIDs match the ones used by kube-prometheus-stack so the same dashboard
+# JSON works in docker compose and Kubernetes.
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    url: http://prometheus:9090
+    access: proxy
+    isDefault: true
+  - name: Loki
+    uid: loki
+    type: loki
+    url: http://loki:3100
+    access: proxy
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id":"(\w+)"'
+          datasourceUid: jaeger
+          url: "$${__value.raw}"
+  - name: Jaeger
+    uid: jaeger
+    type: jaeger
+    url: http://jaeger:16686
+    access: proxy

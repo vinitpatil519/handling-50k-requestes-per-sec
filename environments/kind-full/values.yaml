@@ -1,0 +1,9 @@
+# Kind "full" profile: Istio mTLS mesh + KEDA RPS autoscaling for the API.
+global:
+  imageRegistry: localhost:5001
+  imageTag: dev
+istio:
+  enabled: true
+api:
+  autoscaling:
+    type: keda

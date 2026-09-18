@@ -1,0 +1,179 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy -}}
+{{- $sel := dict -}}
+{{- range $n := list "api" "worker" "web" "envoy" "nginx" "postgres" "redis" "kafka" "migrate" -}}
+{{- $_ := set $sel $n (include "titan.selectorLabels" (dict "root" $ "name" $n)) -}}
+{{- end -}}
+# Zero-trust baseline: deny all ingress in the namespace, then allow each hop
+# of NGINX -> Envoy -> API -> {Postgres, Redis, Kafka} explicitly.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "titan.fullname" . }}-default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "titan.fullname" . }}-nginx
+spec:
+  podSelector:
+    matchLabels:
+      {{- index $sel "nginx" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{ port: 8080 }] # public edge: from anywhere
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.monitoringNamespace }} }
+      ports: [{ port: 9113 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "titan.fullname" . }}-envoy
+spec:
+  podSelector:
+    matchLabels:
+      {{- index $sel "envoy" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- index $sel "nginx" | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- index $sel "web" | nindent 14 }}
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.loadTestNamespace }} }
+      ports: [{ port: 8080 }]
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.monitoringNamespace }} }
+      ports: [{ port: 9901 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "titan.fullname" . }}-web
+spec:
+  podSelector:
+    matchLabels:
+      {{- index $sel "web" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- index $sel "nginx" | nindent 14 }}
+      ports: [{ port: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "titan.fullname" . }}-api
+spec:
+  podSelector:
+    matchLabels:
+      {{- index $sel "api" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- index $sel "envoy" | nindent 14 }}
+        # titanload may bypass the edge to benchmark the API tier directly.
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.loadTestNamespace }} }
+      ports: [{ port: 8080 }, { port: 9090 }]
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.monitoringNamespace }} }
+      ports: [{ port: 9102 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "titan.fullname" . }}-worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- index $sel "worker" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.monitoringNamespace }} }
+      ports: [{ port: 9102 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "titan.fullname" . }}-postgres
+spec:
+  podSelector:
+    matchLabels:
+      {{- index $sel "postgres" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- index $sel "api" | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- index $sel "worker" | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- index $sel "migrate" | nindent 14 }}
+      ports: [{ port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "titan.fullname" . }}-redis
+spec:
+  podSelector:
+    matchLabels:
+      {{- index $sel "redis" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- index $sel "api" | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- index $sel "worker" | nindent 14 }}
+      ports: [{ port: 6379 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "titan.fullname" . }}-kafka
+spec:
+  podSelector:
+    matchLabels:
+      {{- index $sel "kafka" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- index $sel "api" | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- index $sel "worker" | nindent 14 }}
+        # KEDA reads consumer-group lag directly from the brokers.
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ $np.kedaNamespace }} }
+      ports: [{ port: 9092 }]
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- index $sel "kafka" | nindent 14 }}
+      ports: [{ port: 9092 }, { port: 9093 }]
+{{- end }}

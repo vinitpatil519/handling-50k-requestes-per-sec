@@ -1,0 +1,106 @@
+groups:
+  - name: titanedge.recording
+    interval: 15s
+    rules:
+      - record: titan:http_requests:rate1m
+        expr: sum by (namespace, route, code) (rate(titan_http_requests_total[1m]))
+      - record: titan:http_requests_total:rate1m
+        expr: sum by (namespace) (rate(titan_http_requests_total[1m]))
+      - record: titan:http_errors:ratio_rate5m
+        expr: |
+          sum by (namespace) (rate(titan_http_requests_total{code=~"5.."}[5m]))
+          /
+          clamp_min(sum by (namespace) (rate(titan_http_requests_total[5m])), 1e-9)
+      - record: titan:http_latency_seconds:p99_5m
+        expr: histogram_quantile(0.99, sum by (namespace, le) (rate(titan_http_request_duration_seconds_bucket[5m])))
+      - record: titan:http_latency_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (namespace, le) (rate(titan_http_request_duration_seconds_bucket[5m])))
+      - record: titan:worker_events:rate1m
+        expr: sum by (namespace) (rate(titan_worker_events_total{result="ok"}[1m]))
+      - record: titan:cache_hit:ratio_rate5m
+        expr: |
+          sum by (namespace) (rate(titan_cache_requests_total{result="hit"}[5m]))
+          /
+          clamp_min(sum by (namespace) (rate(titan_cache_requests_total[5m])), 1e-9)
+
+  - name: titanedge.slo
+    rules:
+      - alert: TitanAPIHighErrorRate
+        expr: titan:http_errors:ratio_rate5m > 0.01
+        for: 5m
+        labels: { severity: critical, team: platform }
+        annotations:
+          summary: "API 5xx ratio above 1% in {{ $labels.namespace }}"
+          description: "5xx ratio is {{ $value | humanizePercentage }} over 5m."
+          runbook_url: https://github.com/titanedge/titanedge/blob/main/docs/runbook.md#titanapihigherrorrate
+
+      - alert: TitanAPIHighLatencyP99
+        expr: titan:http_latency_seconds:p99_5m > 0.5
+        for: 10m
+        labels: { severity: warning, team: platform }
+        annotations:
+          summary: "API p99 latency above 500ms in {{ $labels.namespace }}"
+          description: "p99 is {{ $value | humanizeDuration }}."
+          runbook_url: https://github.com/titanedge/titanedge/blob/main/docs/runbook.md#titanapihighlatencyp99
+
+      - alert: TitanAPILoadShedding
+        expr: sum by (namespace) (rate(titan_http_shed_total[5m])) > 1
+        for: 5m
+        labels: { severity: warning, team: platform }
+        annotations:
+          summary: "API is rejecting requests (MAX_INFLIGHT reached)"
+          description: "{{ $value | humanize }} req/s shed. Scale out or raise MAX_INFLIGHT."
+          runbook_url: https://github.com/titanedge/titanedge/blob/main/docs/runbook.md#titanapiloadshedding
+
+      - alert: TitanAPIDown
+        expr: absent(up{job=~".*titan-api.*"} == 1)
+        for: 3m
+        labels: { severity: critical, team: platform }
+        annotations:
+          summary: "No titan-api target is up"
+          runbook_url: https://github.com/titanedge/titanedge/blob/main/docs/runbook.md#titanapidown
+
+      - alert: TitanKafkaBackpressure
+        expr: sum by (namespace) (rate(titan_kafka_published_total{result=~"backpressure|error"}[5m])) > 0
+        for: 5m
+        labels: { severity: warning, team: platform }
+        annotations:
+          summary: "Kafka producer is dropping or failing records"
+          runbook_url: https://github.com/titanedge/titanedge/blob/main/docs/runbook.md#titankafkabackpressure
+
+      - alert: TitanWorkerFlushFailing
+        expr: sum by (namespace) (increase(titan_worker_flush_errors_total[10m])) > 3
+        labels: { severity: warning, team: platform }
+        annotations:
+          summary: "Worker cannot persist aggregates (PostgreSQL?)"
+          runbook_url: https://github.com/titanedge/titanedge/blob/main/docs/runbook.md#titanworkerflushfailing
+
+      - alert: TitanConsumerLagHigh
+        expr: max by (exported_namespace, scaledObject) (keda_scaler_metrics_value{scaledObject=~".*worker.*"}) > 100000
+        for: 10m
+        labels: { severity: warning, team: platform }
+        annotations:
+          summary: "Kafka consumer lag above 100k for 10m"
+          description: "Workers cannot keep up; check maxReplicas vs partition count."
+          runbook_url: https://github.com/titanedge/titanedge/blob/main/docs/runbook.md#titanconsumerlaghigh
+
+      - alert: TitanHPAMaxedOut
+        expr: |
+          kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*titan.*"}
+          >= kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler=~".*titan.*"}
+        for: 15m
+        labels: { severity: warning, team: platform }
+        annotations:
+          summary: "{{ $labels.horizontalpodautoscaler }} at max replicas for 15m"
+          runbook_url: https://github.com/titanedge/titanedge/blob/main/docs/runbook.md#titanhpamaxedout
+
+      - alert: TitanEnvoyUpstreamErrors
+        expr: |
+          sum by (namespace) (rate(envoy_cluster_upstream_rq_xx{envoy_cluster_name="titan_api", envoy_response_code_class="5"}[5m]))
+          /
+          clamp_min(sum by (namespace) (rate(envoy_cluster_upstream_rq_total{envoy_cluster_name="titan_api"}[5m])), 1e-9) > 0.02
+        for: 5m
+        labels: { severity: warning, team: platform }
+        annotations:
+          summary: "Envoy sees >2% 5xx from the API cluster"
+          runbook_url: https://github.com/titanedge/titanedge/blob/main/docs/runbook.md#titanenvoyupstreamerrors

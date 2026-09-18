@@ -1,0 +1,110 @@
+{{- $c := dict "root" . "name" "web" -}}
+{{- $v := .Values.web -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  {{- if not $v.autoscaling.enabled }}
+  replicas: {{ $v.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "titan.podLabels" $c | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "titan.component" $c }}
+      automountServiceAccountToken: false
+      {{- include "titan.podSecurity" . | nindent 6 }}
+      {{- include "titan.topologySpread" $c | nindent 6 }}
+      containers:
+        - name: web
+          image: {{ include "titan.ownImage" (dict "root" . "image" $v.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - { name: http, containerPort: 3000, protocol: TCP }
+          env:
+            - name: API_BASE_URL
+              value: "http://{{ include "titan.component" (dict "root" . "name" "envoy") }}:8080"
+            - name: GRAFANA_URL
+              value: {{ $v.links.grafana | quote }}
+            - name: PROMETHEUS_URL
+              value: {{ $v.links.prometheus | quote }}
+            - name: JAEGER_URL
+              value: {{ $v.links.jaeger | quote }}
+            - name: ARGOCD_URL
+              value: {{ $v.links.argocd | quote }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            # Next.js writes its ISR/image cache under .next/cache.
+            - { name: next-cache, mountPath: /app/.next/cache }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: next-cache, emptyDir: { sizeLimit: 256Mi } }
+        - { name: tmp, emptyDir: { sizeLimit: 64Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  selector:
+    {{- include "titan.selectorLabels" $c | nindent 4 }}
+  ports:
+    - { name: http, port: 3000, targetPort: http, appProtocol: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  minAvailable: {{ $v.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+{{- if $v.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "titan.component" $c }}
+  minReplicas: {{ $v.autoscaling.minReplicas }}
+  maxReplicas: {{ $v.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ $v.autoscaling.targetCPUUtilizationPercentage }} }
+{{- end }}

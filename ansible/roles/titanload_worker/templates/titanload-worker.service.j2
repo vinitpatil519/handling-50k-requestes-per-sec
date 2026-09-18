@@ -1,0 +1,23 @@
+[Unit]
+Description=titanload distributed load worker
+Documentation=https://github.com/titanedge/titanedge/blob/main/docs/titanload.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ titanload_user }}
+EnvironmentFile=/etc/default/titanload-worker
+ExecStart={{ titanload_install_path }} worker --loop
+Restart=always
+RestartSec=5
+LimitNOFILE={{ nofile_limit | default(1048576) }}
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+CPUSchedulingPolicy=other
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+- name: Restart titanload worker
+  ansible.builtin.systemd:
+    name: titanload-worker
+    state: restarted
+    daemon_reload: true
+  when: "'loadgen_workers' in group_names"
+  # On first install the unit does not exist yet; titanload_worker starts it.
+  failed_when: false

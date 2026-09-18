@@ -1,0 +1,41 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
+scrape_configs:
+  # DNS service discovery finds every replica of a compose service.
+  - job_name: titan-api
+    dns_sd_configs:
+      - names: [api]
+        type: A
+        port: 9102
+    relabel_configs:
+      - target_label: service
+        replacement: titan-api
+
+  - job_name: titan-worker
+    dns_sd_configs:
+      - names: [worker]
+        type: A
+        port: 9102
+    relabel_configs:
+      - target_label: service
+        replacement: titan-worker
+
+  - job_name: envoy
+    metrics_path: /stats/prometheus
+    static_configs:
+      - targets: ["envoy:9901"]
+
+  - job_name: titanload
+    dns_sd_configs:
+      - names: [titanload]
+        type: A
+        port: 9464
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]

@@ -1,0 +1,167 @@
+{{- $name := printf "%s-titanload" .Release.Name | trunc 50 | trimSuffix "-" -}}
+{{- $image := printf "%s/%s:%s" .Values.image.registry .Values.image.repository .Values.image.tag | trimPrefix "/" -}}
+{{- $l := .Values.load -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+type: Opaque
+stringData:
+  token: {{ .Values.token | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-coordinator
+  labels:
+    app.kubernetes.io/name: titanload
+    app.kubernetes.io/component: coordinator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    app.kubernetes.io/name: titanload
+    app.kubernetes.io/component: coordinator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - { name: http, port: 7070, targetPort: 7070 }
+---
+# The coordinator is a Job: it exits with titanload's status code, so a
+# failed SLO (exit 2) marks the Job failed - handy as a CI gate.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-coordinator
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: titanload
+        app.kubernetes.io/component: coordinator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: coordinator
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - coordinator
+            - --listen=:7070
+            - --expect-workers={{ .Values.workers }}
+            - --no-dashboard
+            - --json=/tmp/report.json
+            - -u={{ $l.url }}
+            - -m={{ $l.mode }}
+            - -X={{ $l.method }}
+            {{- with $l.body }}
+            - -b={{ . }}
+            {{- end }}
+            - -c={{ $l.concurrency }}
+            - -r={{ $l.rate }}
+            - -d={{ $l.duration }}
+            - --ramp={{ $l.ramp }}
+            - -t={{ $l.timeout }}
+            {{- with $l.slo.p99 }}
+            - --slo-p99={{ . }}
+            {{- end }}
+            {{- with $l.slo.errorRatePercent }}
+            - --slo-error-rate={{ . }}
+            {{- end }}
+          env:
+            - name: TITANLOAD_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $name }}, key: token } }
+          ports:
+            - { name: http, containerPort: 7070 }
+          resources:
+            {{- toYaml .Values.coordinator.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-worker
+  labels:
+    app.kubernetes.io/name: titanload
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.workers }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: titanload
+      app.kubernetes.io/component: worker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: titanload
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        # Load generators stay outside the mesh so sidecar CPU does not
+        # distort client-side measurements.
+        sidecar.istio.io/inject: "false"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      # One worker per node gives each a full NIC and CPU budget.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: titanload
+              app.kubernetes.io/component: worker
+      containers:
+        - name: worker
+          image: {{ $image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["worker", "--loop"]
+          env:
+            - name: TITANLOAD_COORDINATOR
+              value: http://{{ $name }}-coordinator:7070
+            - name: TITANLOAD_WORKER_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: TITANLOAD_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $name }}, key: token } }
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+{{- if and .Values.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $name }}
+  labels:
+    release: {{ .Values.serviceMonitor.release }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: titanload
+      app.kubernetes.io/component: coordinator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 5s
+{{- end }}

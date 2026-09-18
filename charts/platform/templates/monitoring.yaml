@@ -1,0 +1,56 @@
+{{- if include "titan.hasMonitoring" . }}
+{{- $m := .Values.monitoring -}}
+{{- range $t := list (dict "name" "api" "port" "http-metrics" "path" "/metrics") (dict "name" "worker" "port" "http-metrics" "path" "/metrics") (dict "name" "envoy" "port" "http-admin" "path" "/stats/prometheus") (dict "name" "nginx" "port" "http-metrics" "path" "/metrics") }}
+{{- if or (ne $t.name "nginx") $.Values.nginx.exporter.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "titan.component" (dict "root" $ "name" $t.name) }}
+  labels:
+    {{- include "titan.labels" (dict "root" $ "name" $t.name) | nindent 4 }}
+    release: {{ $m.release }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" (dict "root" $ "name" $t.name) | nindent 6 }}
+  endpoints:
+    - port: {{ $t.port }}
+      path: {{ $t.path }}
+      interval: {{ $m.scrapeInterval }}
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+{{- end }}
+{{- end }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "titan.fullname" . }}-rules
+  labels:
+    {{- include "titan.labels" (dict "root" . "name" "rules") | nindent 4 }}
+    release: {{ $m.release }}
+spec:
+  {{- .Files.Get "files/prometheus-rules.yaml" | nindent 2 }}
+{{- end }}
+{{- if and .Values.monitoring.enabled .Values.monitoring.dashboards }}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+---
+# Picked up by the Grafana sidecar of kube-prometheus-stack (label below).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "titan.fullname" $ }}-dashboard-{{ base $path | trimSuffix ".json" }}
+  labels:
+    {{- include "titan.labels" (dict "root" $ "name" "dashboards") | nindent 4 }}
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: TitanEdge
+data:
+  {{ base $path }}: |-
+    {{- $.Files.Get $path | nindent 4 }}
+{{- end }}
+{{- end }}

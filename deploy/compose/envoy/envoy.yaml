@@ -1,0 +1,163 @@
+# Envoy edge proxy for docker compose. The Kubernetes equivalent is rendered
+# by charts/platform/templates/envoy-configmap.yaml.
+admin:
+  address:
+    socket_address: { address: 0.0.0.0, port_value: 9901 }
+
+static_resources:
+  listeners:
+    - name: ingress_http
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      per_connection_buffer_limit_bytes: 1048576
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress
+                codec_type: AUTO # HTTP/1.1 and h2c prior knowledge
+                use_remote_address: true
+                xff_num_trusted_hops: 1
+                preserve_external_request_id: true
+                generate_request_id: true
+                common_http_protocol_options:
+                  idle_timeout: 300s
+                http2_protocol_options:
+                  max_concurrent_streams: 1024
+                  initial_stream_window_size: 1048576
+                  initial_connection_window_size: 4194304
+                tracing:
+                  random_sampling: { value: 1 }
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      service_name: titan-envoy
+                      grpc_service:
+                        envoy_grpc: { cluster_name: otel_collector }
+                        timeout: 1s
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    filter:
+                      or_filter:
+                        filters:
+                          - status_code_filter:
+                              comparison: { op: GE, value: { default_value: 500, runtime_key: access_log.min_status } }
+                          - runtime_filter:
+                              runtime_key: access_log.sample
+                              percent_sampled: { numerator: 1, denominator: HUNDRED }
+                              use_independent_randomness: true
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          ts: "%START_TIME%"
+                          method: "%REQ(:METHOD)%"
+                          path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                          status: "%RESPONSE_CODE%"
+                          flags: "%RESPONSE_FLAGS%"
+                          duration_ms: "%DURATION%"
+                          upstream_ms: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+                          upstream: "%UPSTREAM_HOST%"
+                          request_id: "%REQ(X-REQUEST-ID)%"
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: titan_api
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/api/" }
+                          route:
+                            cluster: titan_api
+                            timeout: 15s
+                            retry_policy:
+                              # Only retry when the request provably never reached the API.
+                              retry_on: connect-failure,refused-stream,reset-before-request
+                              num_retries: 2
+                              per_try_timeout: 5s
+                              retry_back_off: { base_interval: 0.01s, max_interval: 0.1s }
+                        - match: { prefix: "/" }
+                          direct_response:
+                            status: 404
+                            body: { inline_string: "{\"error\":\"not found\"}" }
+                http_filters:
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: edge_rate_limit
+                      token_bucket:
+                        max_tokens: 400000
+                        tokens_per_fill: 200000
+                        fill_interval: 1s
+                      filter_enabled:
+                        runtime_key: local_rate_limit_enabled
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                      filter_enforced:
+                        runtime_key: local_rate_limit_enforced
+                        default_value: { numerator: 100, denominator: HUNDRED }
+                      response_headers_to_add:
+                        - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                          header: { key: x-ratelimited, value: "true" }
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: titan_api
+      type: STRICT_DNS # resolves every `api` replica; Envoy balances per request
+      dns_refresh_rate: 5s
+      lb_policy: LEAST_REQUEST
+      connect_timeout: 1s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          common_http_protocol_options:
+            idle_timeout: 60s
+          explicit_http_config:
+            http2_protocol_options:
+              max_concurrent_streams: 1000
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: 10000
+            max_pending_requests: 20000
+            max_requests: 100000
+            retry_budget:
+              budget_percent: { value: 20 }
+              min_retry_concurrency: 10
+      outlier_detection:
+        consecutive_5xx: 5
+        consecutive_gateway_failure: 3
+        interval: 5s
+        base_ejection_time: 15s
+        max_ejection_percent: 50
+      health_checks:
+        - timeout: 1s
+          interval: 5s
+          unhealthy_threshold: 3
+          healthy_threshold: 1
+          http_health_check: { path: /readyz }
+      load_assignment:
+        cluster_name: titan_api
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: api, port_value: 8080 }
+
+    - name: otel_collector
+      type: STRICT_DNS
+      connect_timeout: 1s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: otel_collector
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: otel-collector, port_value: 4317 }

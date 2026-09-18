@@ -1,0 +1,10 @@
+docker_daemon_config:
+  log-driver: json-file
+  log-opts:
+    max-size: 50m
+    max-file: "3"
+  default-ulimits:
+    nofile:
+      Name: nofile
+      Soft: 1048576
+      Hard: 1048576

@@ -1,0 +1,63 @@
+# Tail container logs on every node, enrich with Kubernetes metadata, parse
+# JSON application logs and ship to Loki.
+config:
+  service: |
+    [SERVICE]
+        Daemon Off
+        Flush 1
+        Log_Level warn
+        Parsers_File /fluent-bit/etc/parsers.conf
+        Parsers_File /fluent-bit/etc/conf/custom_parsers.conf
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port 2020
+        Health_Check On
+
+  inputs: |
+    [INPUT]
+        Name tail
+        Path /var/log/containers/*.log
+        Exclude_Path /var/log/containers/*fluent-bit*.log
+        multiline.parser cri
+        Tag kube.*
+        Mem_Buf_Limit 32MB
+        Skip_Long_Lines On
+        Refresh_Interval 5
+
+  filters: |
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Keep_Log Off
+        K8S-Logging.Parser On
+        K8S-Logging.Exclude On
+        Labels On
+        Annotations Off
+
+    [FILTER]
+        Name nest
+        Match kube.*
+        Operation lift
+        Nested_under kubernetes
+        Add_prefix k8s_
+
+  outputs: |
+    [OUTPUT]
+        Name loki
+        Match kube.*
+        Host loki-gateway.observability.svc.cluster.local
+        Port 80
+        Labels job=fluent-bit, namespace=$k8s_namespace_name, pod=$k8s_pod_name, container=$k8s_container_name, app=$k8s_labels['app.kubernetes.io/name']
+        Remove_Keys k8s_pod_id, k8s_docker_id, k8s_container_hash, k8s_container_image
+        Line_Format json
+        Retry_Limit 5
+
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: kube-prometheus-stack
+
+resources:
+  requests: { cpu: 20m, memory: 32Mi }
+  limits: { memory: 128Mi }

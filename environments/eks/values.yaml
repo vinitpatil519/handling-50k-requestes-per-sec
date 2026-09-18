@@ -1,0 +1,89 @@
+# EKS profile. Images come from ECR (infra/terraform/envs/eks outputs the
+# registry URL), data stores can be managed services, and capacity is sized
+# for real load. Replace ACCOUNT/REGION or pass --set at deploy time.
+global:
+  imageRegistry: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+  imageTag: "1.0.0"
+  imagePullPolicy: IfNotPresent
+
+istio:
+  enabled: true
+
+topologySpread:
+  whenUnsatisfiable: DoNotSchedule
+
+api:
+  resources:
+    requests: { cpu: "1", memory: 256Mi }
+    limits: { cpu: "2", memory: 512Mi }
+  env:
+    DB_MAX_CONNS: "8"
+    MAX_INFLIGHT: "50000"
+  autoscaling:
+    type: keda
+    minReplicas: 6
+    maxReplicas: 200
+    keda:
+      rpsPerPod: "15000"
+
+worker:
+  autoscaling:
+    maxReplicas: 48
+
+web:
+  autoscaling:
+    minReplicas: 3
+    maxReplicas: 20
+
+envoy:
+  concurrency: 4
+  resources:
+    requests: { cpu: "2", memory: 256Mi }
+    limits: { cpu: "4", memory: 512Mi }
+  rateLimit:
+    maxTokens: 2000000
+    tokensPerFill: 1000000
+  autoscaling:
+    minReplicas: 4
+    maxReplicas: 60
+
+nginx:
+  service:
+    # AWS Load Balancer Controller provisions an NLB in front of NGINX.
+    type: LoadBalancer
+    nodePort: null
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+      service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+  resources:
+    requests: { cpu: "2", memory: 256Mi }
+    limits: { cpu: "4", memory: 512Mi }
+  autoscaling:
+    minReplicas: 4
+    maxReplicas: 60
+
+# Managed data services from infra/terraform (rds, elasticache modules).
+postgres:
+  enabled: false
+  auth:
+    existingSecret: titan-db   # keys: password, database-url
+externalDatabase:
+  url: ""                      # taken from existingSecret
+redis:
+  enabled: false
+externalRedis:
+  addr: titan-redis.xxxxxx.ng.0001.use1.cache.amazonaws.com:6379
+  tls: true
+
+kafka:
+  replicas: 3
+  partitions: 48
+  heapOpts: "-Xms2g -Xmx2g"
+  storage:
+    size: 200Gi
+    storageClass: gp3
+  resources:
+    requests: { cpu: "2", memory: 4Gi }
+    limits: { cpu: "4", memory: 6Gi }

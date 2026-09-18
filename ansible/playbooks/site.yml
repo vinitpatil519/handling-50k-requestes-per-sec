@@ -1,0 +1,3 @@
+# Everything for a single Linux box: tools, then the Kind platform.
+- import_playbook: workstation.yml
+- import_playbook: kind-cluster.yml

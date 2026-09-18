@@ -1,0 +1,22 @@
+# istiod tuned for a laptop; raise resources for real clusters.
+pilot:
+  autoscaleEnabled: false
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+meshConfig:
+  accessLogFile: ""            # Envoy + NGINX already log (sampled)
+  enableTracing: true
+  defaultConfig:
+    holdApplicationUntilProxyStarts: true
+    tracing:
+      sampling: 1.0
+  extensionProviders:
+    - name: otel
+      opentelemetry:
+        service: otel-collector.observability.svc.cluster.local
+        port: 4317
+global:
+  proxy:
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { cpu: "1", memory: 256Mi }

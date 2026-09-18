@@ -1,0 +1,62 @@
+# Jenkins controller with Configuration-as-Code. Builds run in ephemeral
+# Kubernetes agent pods defined in the Jenkinsfile.
+# UI: http://localhost:8081 (admin / admin on Kind - change it!)
+fullnameOverride: jenkins
+controller:
+  admin:
+    username: admin
+    password: admin
+  serviceType: NodePort
+  nodePort: 30880
+  resources:
+    requests: { cpu: 250m, memory: 768Mi }
+    limits: { memory: 2Gi }
+  installPlugins:
+    - kubernetes
+    - workflow-aggregator
+    - git
+    - configuration-as-code
+    - pipeline-stage-view
+    - credentials-binding
+    - timestamper
+    - junit
+    - ws-cleanup
+    - ansicolor
+    - pipeline-utility-steps
+    - job-dsl
+  JCasC:
+    defaultConfig: true
+    configScripts:
+      titanedge-job: |
+        jobs:
+          - script: >
+              pipelineJob('titanedge') {
+                description('TitanEdge build, scan, GitOps promote and load-test gate')
+                properties { disableConcurrentBuilds() }
+                triggers { pollSCM { scmpoll_spec('H/5 * * * *') } }
+                definition {
+                  cpsScm {
+                    scm {
+                      git {
+                        remote { url(System.getenv('TITANEDGE_REPO_URL') ?: 'https://github.com/YOUR_ORG/titanedge.git') }
+                        branch('*/main')
+                      }
+                    }
+                    scriptPath('Jenkinsfile')
+                  }
+                }
+              }
+  installLatestPlugins: true
+  containerEnv:
+    - name: TITANEDGE_REPO_URL
+      value: https://github.com/YOUR_ORG/titanedge.git
+agent:
+  enabled: true
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+persistence:
+  enabled: true
+  size: 8Gi
+serviceAccount:
+  create: true
+  name: jenkins

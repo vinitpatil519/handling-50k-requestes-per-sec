@@ -1,0 +1,63 @@
+# Ephemeral build agent. Every stage runs in the container it needs; nothing
+# is installed on the Jenkins controller.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    jenkins/agent: titanedge
+spec:
+  serviceAccountName: jenkins
+  securityContext:
+    fsGroup: 1000
+  containers:
+    - name: golang
+      image: golang:1.27-alpine
+      command: [cat]
+      tty: true
+      env:
+        - { name: GOFLAGS, value: -buildvcs=false }
+        - { name: CGO_ENABLED, value: "0" }
+      resources:
+        requests: { cpu: 500m, memory: 512Mi }
+        limits: { memory: 2Gi }
+    - name: node
+      image: node:24-alpine
+      command: [cat]
+      tty: true
+      resources:
+        requests: { cpu: 250m, memory: 512Mi }
+        limits: { memory: 2Gi }
+    - name: tools
+      image: localhost:5001/titanedge/ci-tools:latest
+      command: [cat]
+      tty: true
+    - name: terraform
+      image: hashicorp/terraform:1.12
+      command: [cat]
+      tty: true
+    - name: trivy
+      image: aquasec/trivy:0.74.0
+      command: [cat]
+      tty: true
+      env:
+        - { name: TRIVY_CACHE_DIR, value: /tmp/trivy }
+    # Rootless BuildKit: builds OCI images without a Docker daemon or
+    # privileged pods (Kaniko has been archived upstream).
+    - name: buildkit
+      image: moby/buildkit:v0.33.0-rootless
+      command: [cat]
+      tty: true
+      env:
+        - { name: BUILDKITD_FLAGS, value: --oci-worker-no-process-sandbox }
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: Unconfined }
+        appArmorProfile: { type: Unconfined }
+      volumeMounts:
+        - { name: buildkitd, mountPath: /home/user/.local/share/buildkit }
+      resources:
+        requests: { cpu: "1", memory: 1Gi }
+        limits: { memory: 4Gi }
+  volumes:
+    - { name: buildkitd, emptyDir: {} }

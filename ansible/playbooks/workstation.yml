@@ -1,0 +1,31 @@
+# Turns an Ubuntu/Debian machine (or WSL2 distro) into a TitanEdge dev box:
+# Docker, kind, kubectl, Helm, Terraform, Go and kernel limits sized for load
+# testing.
+#   ansible-playbook playbooks/workstation.yml -K
+- name: TitanEdge workstation
+  hosts: workstation
+  become: true
+  roles:
+    - common
+    - docker
+    - k8s_tools
+    - golang
+    - terraform
+    - kernel_tuning
+  post_tasks:
+    - name: Show tool versions
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - docker --version
+        - kind version
+        - kubectl version --client
+        - helm version --short
+        - terraform version
+        - /usr/local/go/bin/go version
+      register: versions
+      changed_when: false
+      become: false
+
+    - name: Versions
+      ansible.builtin.debug:
+        msg: "{{ versions.results | map(attribute='stdout') | list }}"

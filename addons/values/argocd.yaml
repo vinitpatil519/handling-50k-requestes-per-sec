@@ -1,0 +1,47 @@
+# Argo CD reachable at https://localhost:8443 on Kind (NodePort 30443).
+# Initial admin password:
+#   kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+fullnameOverride: argocd
+configs:
+  params:
+    server.insecure: false
+  cm:
+    # Let app-of-apps sync waves wait for child Applications to be healthy.
+    resource.customizations.health.argoproj.io_Application: |
+      hs = {}
+      hs.status = "Progressing"
+      hs.message = ""
+      if obj.status ~= nil and obj.status.health ~= nil then
+        hs.status = obj.status.health.status
+        if obj.status.health.message ~= nil then hs.message = obj.status.health.message end
+      end
+      return hs
+    # Health checks for KEDA ScaledObjects (shows Degraded when not ready).
+    resource.customizations.health.keda.sh_ScaledObject: |
+      hs = {}
+      if obj.status ~= nil and obj.status.conditions ~= nil then
+        for _, c in ipairs(obj.status.conditions) do
+          if c.type == "Ready" and c.status == "False" then
+            hs.status = "Degraded"; hs.message = c.message; return hs
+          end
+        end
+      end
+      hs.status = "Healthy"; return hs
+server:
+  service:
+    type: NodePort
+    nodePortHttps: 30443
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+controller:
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+repoServer:
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+dex:
+  enabled: false
+notifications:
+  enabled: false
+applicationSet:
+  replicas: 1

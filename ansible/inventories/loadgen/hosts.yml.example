@@ -1,0 +1,21 @@
+# Distributed titanload fleet: any Linux VMs (cloud spot instances, spare
+# laptops, a homelab). Copy to hosts.yml and adjust.
+#   ansible-playbook -i inventories/loadgen/hosts.yml playbooks/loadgen.yml
+all:
+  vars:
+    ansible_user: ubuntu
+    titanload_coordinator_url: http://10.0.0.10:7070
+    titanload_token: "{{ lookup('env', 'TITANLOAD_TOKEN') | default('change-me', true) }}"
+  children:
+    loadgen_coordinator:
+      hosts:
+        coord-1:
+          ansible_host: 10.0.0.10
+    loadgen_workers:
+      hosts:
+        worker-1:
+          ansible_host: 10.0.0.11
+        worker-2:
+          ansible_host: 10.0.0.12
+        worker-3:
+          ansible_host: 10.0.0.13

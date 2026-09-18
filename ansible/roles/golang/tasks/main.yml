@@ -1,0 +1,26 @@
+- name: Check installed Go
+  ansible.builtin.command: /usr/local/go/bin/go version
+  register: go_current
+  changed_when: false
+  failed_when: false
+
+- name: Install Go {{ go_version }}
+  when: ("go" + go_version) not in (go_current.stdout | default(''))
+  block:
+    - name: Remove previous Go
+      ansible.builtin.file:
+        path: /usr/local/go
+        state: absent
+
+    - name: Unpack Go
+      ansible.builtin.unarchive:
+        src: "https://go.dev/dl/go{{ go_version }}.linux-{{ go_arch }}.tar.gz"
+        dest: /usr/local
+        remote_src: true
+
+- name: Go on PATH
+  ansible.builtin.copy:
+    dest: /etc/profile.d/go.sh
+    mode: "0644"
+    content: |
+      export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin

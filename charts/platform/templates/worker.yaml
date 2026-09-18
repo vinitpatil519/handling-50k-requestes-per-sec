@@ -1,0 +1,142 @@
+{{- $c := dict "root" . "name" "worker" -}}
+{{- $v := .Values.worker -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  {{- if not $v.autoscaling.enabled }}
+  replicas: {{ $v.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "titan.podLabels" $c | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9102"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: {{ include "titan.component" $c }}
+      automountServiceAccountToken: false
+      # Enough time to flush the in-memory batch and commit offsets.
+      terminationGracePeriodSeconds: 30
+      {{- include "titan.podSecurity" . | nindent 6 }}
+      {{- include "titan.topologySpread" $c | nindent 6 }}
+      containers:
+        - name: worker
+          image: {{ include "titan.ownImage" (dict "root" . "image" $v.image) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - { name: metrics, containerPort: 9102, protocol: TCP }
+          env:
+            {{- include "titan.backendEnv" . | nindent 12 }}
+            - name: OTEL_SERVICE_NAME
+              value: titan-worker
+            - name: KAFKA_GROUP_ID
+              value: titan-worker
+            {{- range $k, $val := $v.env }}
+            - name: {{ $k }}
+              value: {{ $val | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          {{- include "titan.containerSecurity" . | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  selector:
+    {{- include "titan.selectorLabels" $c | nindent 4 }}
+  ports:
+    - { name: http-metrics, port: 9102, targetPort: metrics, appProtocol: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  maxUnavailable: {{ $v.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+{{- if $v.autoscaling.enabled }}
+{{- if include "titan.hasKeda" . }}
+---
+# Event-driven autoscaling on Kafka consumer-group lag.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "titan.component" $c }}
+  minReplicaCount: {{ $v.autoscaling.minReplicas }}
+  maxReplicaCount: {{ min $v.autoscaling.maxReplicas .Values.kafka.partitions }}
+  pollingInterval: 5
+  cooldownPeriod: 60
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 120
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: {{ include "titan.kafkaBrokers" . | quote }}
+        consumerGroup: titan-worker
+        topic: {{ .Values.kafka.topic }}
+        lagThreshold: {{ $v.autoscaling.lagThreshold | quote }}
+        activationLagThreshold: "10"
+        offsetResetPolicy: earliest
+        allowIdleConsumers: "false"
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: {{ $v.autoscaling.targetCPUUtilizationPercentage | quote }}
+{{- else }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "titan.component" $c }}
+  minReplicas: {{ $v.autoscaling.minReplicas }}
+  maxReplicas: {{ min $v.autoscaling.maxReplicas .Values.kafka.partitions }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $v.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

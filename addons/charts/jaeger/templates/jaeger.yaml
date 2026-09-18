@@ -1,0 +1,60 @@
+# Jaeger v2 all-in-one (in-memory storage) for Kind. It receives OTLP from the
+# OpenTelemetry Collector. For production use the jaeger Helm chart with
+# Elasticsearch/OpenSearch or Cassandra storage.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  labels: { app: jaeger }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: jaeger }
+  template:
+    metadata:
+      labels: { app: jaeger }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: jaeger
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          ports:
+            - { name: ui, containerPort: 16686 }
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
+          readinessProbe:
+            httpGet: { path: /, port: ui }
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-collector
+spec:
+  selector: { app: jaeger }
+  ports:
+    - { name: grpc-otlp, port: 4317, targetPort: otlp-grpc }
+    - { name: http-otlp, port: 4318, targetPort: otlp-http }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-query
+spec:
+  type: {{ .Values.ui.serviceType }}
+  selector: { app: jaeger }
+  ports:
+    - name: http-ui
+      port: 16686
+      targetPort: ui
+      {{- if eq .Values.ui.serviceType "NodePort" }}
+      nodePort: {{ .Values.ui.nodePort }}
+      {{- end }}

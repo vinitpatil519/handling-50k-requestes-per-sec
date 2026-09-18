@@ -1,0 +1,23 @@
+TitanEdge {{ .Chart.AppVersion }} deployed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Traffic path:  client -> {{ include "titan.component" (dict "root" . "name" "nginx") }} -> {{ include "titan.component" (dict "root" . "name" "envoy") }} -> {{ include "titan.component" (dict "root" . "name" "api") }} -> postgres / redis / kafka
+
+{{- if eq .Values.nginx.service.type "NodePort" }}
+
+On Kind the edge is published at:
+  http://localhost:8080            (dashboard)
+  http://localhost:8080/api/v1/ping
+
+{{- end }}
+
+Check it:
+  kubectl -n {{ .Release.Namespace }} get pods,hpa
+  kubectl -n {{ .Release.Namespace }} get scaledobjects   # when KEDA is installed
+
+Features rendered in this release:
+  ServiceMonitors / rules / dashboards : {{ if include "titan.hasMonitoring" . }}yes{{ else }}no (kube-prometheus-stack CRDs not found or disabled){{ end }}
+  KEDA ScaledObjects                   : {{ if include "titan.hasKeda" . }}yes{{ else }}no (falling back to CPU HPAs){{ end }}
+  Istio mTLS + AuthorizationPolicies   : {{ if include "titan.hasIstio" . }}yes{{ else }}no{{ end }}
+
+Load test:
+  titanload run -u http://localhost:8080/api/v1/ping -c 256 -d 60s

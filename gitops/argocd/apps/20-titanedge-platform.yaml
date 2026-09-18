@@ -1,0 +1,32 @@
+# The application itself. Jenkins promotes a build by committing a new
+# global.imageTag to environments/<env>/values.yaml; Argo CD rolls it out.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: titanedge-platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: titanedge
+  source:
+    repoURL: https://github.com/YOUR_ORG/titanedge.git
+    targetRevision: main
+    path: charts/platform
+    helm:
+      releaseName: titan
+      valueFiles:
+        - ../../environments/kind/values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: titanedge
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true, ServerSideApply=true, RespectIgnoreDifferences=true]
+  # HPAs / KEDA own replica counts.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers: [/spec/replicas]
+  revisionHistoryLimit: 10

@@ -1,0 +1,332 @@
+{{- /*
+Data tier for Kind / demo clusters. Pods are excluded from the Istio mesh
+(stateful protocols, native TLS is the production answer) and in production
+you would point externalDatabase / externalRedis / externalKafka at managed
+services (RDS, ElastiCache, MSK) created by infra/terraform.
+*/ -}}
+{{- if .Values.postgres.enabled }}
+{{- $c := dict "root" . "name" "postgres" "noMesh" true -}}
+{{- $v := .Values.postgres -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  selector:
+    {{- include "titan.selectorLabels" $c | nindent 4 }}
+  ports:
+    - { name: tcp-postgres, port: 5432, targetPort: postgres, appProtocol: postgresql }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  serviceName: {{ include "titan.component" $c }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "titan.podLabels" $c | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "titan.component" $c }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: {{ include "titan.image" $v.image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - max_connections={{ $v.maxConnections }}
+            - -c
+            - shared_buffers={{ $v.sharedBuffers }}
+            - -c
+            - synchronous_commit=off
+            - -c
+            - log_min_duration_statement=250
+          env:
+            - name: POSTGRES_USER
+              value: {{ $v.auth.username | quote }}
+            - name: POSTGRES_DB
+              value: {{ $v.auth.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.secretName" . }}
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -h 127.0.0.1"]
+            periodSeconds: 15
+            failureThreshold: 6
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - { name: run, emptyDir: {} }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 256Mi } }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $v.storage.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $v.storage.size }}
+{{- end }}
+{{- if .Values.redis.enabled }}
+{{- $c := dict "root" . "name" "redis" "noMesh" true -}}
+{{- $v := .Values.redis }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  selector:
+    {{- include "titan.selectorLabels" $c | nindent 4 }}
+  ports:
+    - { name: tcp-redis, port: 6379, targetPort: redis, appProtocol: redis }
+---
+# Redis is a cache and live-counter store here, so it runs without
+# persistence; losing it only costs a cache warm-up.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "titan.component" $c }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "titan.podLabels" $c | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "titan.component" $c }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: redis
+          image: {{ include "titan.image" $v.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - >-
+              exec redis-server
+              --save ""
+              --appendonly no
+              --maxmemory {{ $v.maxmemory }}
+              --maxmemory-policy allkeys-lru
+              --tcp-backlog 4096
+              --requirepass "$REDIS_PASSWORD"
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.component" (dict "root" . "name" "secrets") }}
+                  key: redis-password
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "titan.component" (dict "root" . "name" "secrets") }}
+                  key: redis-password
+          ports:
+            - { name: redis, containerPort: 6379 }
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            periodSeconds: 15
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - { name: data, emptyDir: {} }
+{{- end }}
+{{- if .Values.kafka.enabled }}
+{{- $c := dict "root" . "name" "kafka" "noMesh" true -}}
+{{- $v := .Values.kafka -}}
+{{- $name := include "titan.component" $c -}}
+{{- $voters := list -}}
+{{- range $i := until (int $v.replicas) -}}
+{{- $voters = append $voters (printf "%d@%s-%d.%s-headless.%s.svc.cluster.local:9093" $i $name $i $name $.Release.Namespace) -}}
+{{- end -}}
+{{- $rf := min 3 (int $v.replicas) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-headless
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  clusterIP: None
+  # Brokers must resolve each other before they are ready (KRaft quorum).
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "titan.selectorLabels" $c | nindent 4 }}
+  ports:
+    - { name: tcp-kafka, port: 9092, targetPort: kafka }
+    - { name: tcp-controller, port: 9093, targetPort: controller }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  selector:
+    {{- include "titan.selectorLabels" $c | nindent 4 }}
+  ports:
+    - { name: tcp-kafka, port: 9092, targetPort: kafka }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "titan.labels" $c | nindent 4 }}
+spec:
+  serviceName: {{ $name }}-headless
+  replicas: {{ $v.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "titan.selectorLabels" $c | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "titan.podLabels" $c | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      {{- include "titan.topologySpread" $c | nindent 6 }}
+      containers:
+        - name: kafka
+          image: {{ include "titan.image" $v.image }}
+          imagePullPolicy: IfNotPresent
+          # Derive node id and advertised address from the pod ordinal.
+          command: ["sh", "-c"]
+          args:
+            - |
+              export KAFKA_NODE_ID="${HOSTNAME##*-}"
+              export KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${HOSTNAME}.{{ $name }}-headless.{{ .Release.Namespace }}.svc.cluster.local:9092"
+              exec /etc/kafka/docker/run
+          env:
+            - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
+            - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: CONTROLLER }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT" }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: {{ join "," $voters | quote }} }
+            - { name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data }
+            - { name: KAFKA_NUM_PARTITIONS, value: {{ $v.partitions | quote }} }
+            - { name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: {{ $rf | quote }} }
+            - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: {{ $rf | quote }} }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: {{ $rf | quote }} }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: {{ max 1 (sub $rf 1) | quote }} }
+            - { name: KAFKA_MIN_INSYNC_REPLICAS, value: {{ max 1 (sub $rf 1) | quote }} }
+            - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
+            - { name: KAFKA_LOG_RETENTION_HOURS, value: "24" }
+            - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "true" }
+            - { name: KAFKA_HEAP_OPTS, value: {{ $v.heapOpts | quote }} }
+            - { name: CLUSTER_ID, value: "dGl0YW5lZGdlLWthZmthMQ" }
+          ports:
+            - { name: kafka, containerPort: 9092 }
+            - { name: controller, containerPort: 9093 }
+          readinessProbe:
+            tcpSocket: { port: kafka }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: controller }
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/kafka/data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $v.storage.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $v.storage.size }}
+{{- end }}
