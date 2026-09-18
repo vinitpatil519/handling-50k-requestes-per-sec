@@ -1,4 +1,4 @@
-# TitanEdge
+# Handling 50k requests per sec at peak
 
 A production-style, hyperscale DevOps reference platform you can run **for free on a laptop with Kind**, and deploy to **Amazon EKS** when you want real capacity.
 
